@@ -202,9 +202,9 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/api/products", post(create_product))
         .route("/api/products/{id}/image", put(update_product_image))
         // Filament routes
-        .route("/api//filaments", get(get_filaments))
-        .route("/api//filaments", post(create_filament))
-        .route("/api//filaments/{id}/image", put(update_filament_image))
+        .route("/api/filaments", get(get_filaments))
+        .route("/api/filaments", post(create_filament))
+        .route("/api/filaments/{id}/image", put(update_filament_image))
         // Order routes
         .route("/api/orders", get(get_orders))
         .route("/api/orders", post(create_order))
