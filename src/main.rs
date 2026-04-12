@@ -13,6 +13,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
+use std::backtrace::Backtrace;
+use std::sync::OnceLock;
 use thiserror::Error;
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
 use tower_http::cors::CorsLayer;
@@ -487,6 +489,16 @@ pub enum AuthError {
     InvalidPassword(String),
 }
 
+fn expose_internal_errors() -> bool {
+    static EXPOSE_INTERNAL_ERRORS: OnceLock<bool> = OnceLock::new();
+
+    *EXPOSE_INTERNAL_ERRORS.get_or_init(|| {
+        std::env::var("EXPOSE_INTERNAL_ERRORS")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let status = match self {
@@ -496,6 +508,22 @@ impl IntoResponse for AuthError {
             AuthError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             AuthError::InvalidUsername(_) | AuthError::InvalidPassword(_) => StatusCode::BAD_REQUEST,
         };
+
+        if matches!(self, AuthError::Internal) {
+            let backtrace = Backtrace::force_capture();
+            tracing::error!("internal error response generated\nbacktrace:\n{backtrace}");
+
+            if expose_internal_errors() {
+                return (
+                    status,
+                    format!("internal error\nbacktrace:\n{backtrace}"),
+                )
+                    .into_response();
+            }
+
+            return (status, "internal error").into_response();
+        }
+
         (status, self.to_string()).into_response()
     }
 }
