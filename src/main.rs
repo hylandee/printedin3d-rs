@@ -11,6 +11,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
 use thiserror::Error;
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
@@ -34,7 +35,15 @@ impl Default for UserRole {
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let db = SqlitePool::connect("sqlite:auth.db?mode=rwc")
+    let connect_opts = SqliteConnectOptions::new()
+        .filename("auth.db")
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(5));
+
+    let db = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(connect_opts)
         .await
         .expect("db connect failed");
 

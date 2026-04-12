@@ -21,4 +21,8 @@ target
 #.idea/
 /target
 
+<<<<<<< Updated upstream
 auth.db
+=======
+**/__pycache__/
+>>>>>>> Stashed changes
