@@ -62,6 +62,10 @@ async fn main() {
     .await
     .expect("failed to create users table");
 
+    migrate_users_table(&db)
+        .await
+        .expect("failed to migrate users table");
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
@@ -191,6 +195,27 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
 
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn migrate_users_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let role_col_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'role'",
+    )
+    .fetch_one(db)
+    .await?;
+
+    if role_col_exists == 0 {
+        sqlx::query("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'Customer'")
+            .execute(db)
+            .await?;
+    }
+
+    // Backfill legacy rows so role checks always have a value.
+    sqlx::query("UPDATE users SET role = 'Customer' WHERE role IS NULL OR role = ''")
+        .execute(db)
+        .await?;
+
+    Ok(())
 }
 
 //
