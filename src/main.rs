@@ -13,7 +13,6 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
 use sqlx::SqlitePool;
-use std::backtrace::Backtrace;
 use std::sync::OnceLock;
 use thiserror::Error;
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
@@ -482,6 +481,9 @@ pub enum AuthError {
     #[error("internal error")]
     Internal,
 
+    #[error("internal error: {0}")]
+    InternalDetailed(String),
+
     #[error("invalid username: {0}")]
     InvalidUsername(String),
 
@@ -501,24 +503,19 @@ fn expose_internal_errors() -> bool {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             AuthError::InvalidCredentials | AuthError::Unauthorized => StatusCode::UNAUTHORIZED,
             AuthError::UserAlreadyExists => StatusCode::CONFLICT,
             AuthError::SessionExpired => StatusCode::UNAUTHORIZED,
-            AuthError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+            AuthError::Internal | AuthError::InternalDetailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AuthError::InvalidUsername(_) | AuthError::InvalidPassword(_) => StatusCode::BAD_REQUEST,
         };
 
-        if matches!(self, AuthError::Internal) {
-            let backtrace = Backtrace::force_capture();
-            tracing::error!("internal error response generated\nbacktrace:\n{backtrace}");
+        if matches!(self, AuthError::Internal | AuthError::InternalDetailed(_)) {
+            tracing::error!("{self}");
 
             if expose_internal_errors() {
-                return (
-                    status,
-                    format!("internal error\nbacktrace:\n{backtrace}"),
-                )
-                    .into_response();
+                return (status, self.to_string()).into_response();
             }
 
             return (status, "internal error").into_response();
@@ -1383,7 +1380,10 @@ pub async fn create_user(state: &AppState, payload: SignupRequest) -> Result<(),
                     return Err(AuthError::UserAlreadyExists);
                 }
             }
-            Err(AuthError::Internal)
+            Err(AuthError::InternalDetailed(format!(
+                "failed to create user '{}': {}",
+                payload.username, err
+            )))
         }
     }
 }
