@@ -3,13 +3,17 @@
 set -euo pipefail
 
 # ---- CONFIG ----
-APP_NAME="my_rust_app"                 # binary name
-SERVICE_NAME="my_rust_app.service"     # systemd service
+APP_NAME="rust-server"
+SERVICE_NAME="printedin3d-rs.service"
+APP_USER="printedin3d"
+APP_GROUP="printedin3d"
+APP_DIR="/opt/printedin3d"
 BUILD_DIR="target/release"
-DEST_PATH="/usr/local/bin/$APP_NAME"   # where systemd expects the binary
+DEST_PATH="/usr/local/bin/$APP_NAME"
+SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 
 # ---- BUILD ----
-echo "==> Building release binary..."
+echo "==> Building release binary locally from current repo..."
 cargo build --release
 
 # ---- VERIFY BUILD OUTPUT ----
@@ -18,24 +22,57 @@ if [[ ! -f "$BUILD_DIR/$APP_NAME" ]]; then
   exit 1
 fi
 
-# ---- STOP SERVICE ----
-echo "==> Stopping systemd service: $SERVICE_NAME"
-sudo systemctl stop "$SERVICE_NAME"
+# ---- BOOTSTRAP USER + APP DIR ----
+echo "==> Ensuring service user/group exist..."
+if ! getent group "$APP_GROUP" >/dev/null; then
+  sudo groupadd --system "$APP_GROUP"
+fi
 
-# ---- COPY BINARY ----
-echo "==> Deploying binary to $DEST_PATH"
-sudo cp "$BUILD_DIR/$APP_NAME" "$DEST_PATH"
-sudo chmod +x "$DEST_PATH"
+if ! id -u "$APP_USER" >/dev/null 2>&1; then
+  sudo useradd --system --gid "$APP_GROUP" --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$APP_USER"
+fi
 
-# Optional: ensure correct ownership
-# sudo chown root:root "$DEST_PATH"
+echo "==> Ensuring runtime directory exists at $APP_DIR"
+sudo mkdir -p "$APP_DIR"
+sudo chown -R "$APP_USER:$APP_GROUP" "$APP_DIR"
+sudo chmod 755 "$APP_DIR"
 
-# ---- START SERVICE ----
-echo "==> Starting systemd service: $SERVICE_NAME"
-sudo systemctl start "$SERVICE_NAME"
+# ---- INSTALL BINARY ----
+echo "==> Installing binary to $DEST_PATH"
+sudo install -m 755 "$BUILD_DIR/$APP_NAME" "$DEST_PATH"
+
+# ---- INSTALL/UPDATE SYSTEMD UNIT ----
+echo "==> Writing systemd unit: $SERVICE_PATH"
+sudo tee "$SERVICE_PATH" >/dev/null <<EOF
+[Unit]
+Description=PrintedIn3D Rust Backend
+After=network.target
+
+[Service]
+Type=simple
+User=$APP_USER
+Group=$APP_GROUP
+WorkingDirectory=$APP_DIR
+ExecStart=$DEST_PATH
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ---- RELOAD + ENABLE + RESTART ----
+echo "==> Reloading systemd daemon"
+sudo systemctl daemon-reload
+
+echo "==> Enabling service on boot"
+sudo systemctl enable "$SERVICE_NAME"
+
+echo "==> Restarting service"
+sudo systemctl restart "$SERVICE_NAME"
 
 # ---- STATUS ----
 echo "==> Service status:"
 sudo systemctl status "$SERVICE_NAME" --no-pager
 
-echo "==> Deployment complete."
+echo "==> Done. Backend is configured to start on boot."
