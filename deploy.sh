@@ -12,6 +12,32 @@ BUILD_DIR="target/release"
 DEST_PATH="/usr/local/bin/$APP_NAME"
 SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
 
+# ---- MODE ----
+# Usage:
+#   ./deploy.sh            — first-time full setup (bootstrap + build + install)
+#   ./deploy.sh update     — pull latest code, rebuild, restart
+MODE="${1:-setup}"
+
+if [[ "$MODE" == "update" ]]; then
+  echo "==> Pulling latest code..."
+  git pull
+
+  echo "==> Rebuilding..."
+  cargo build --release
+
+  echo "==> Installing binary..."
+  sudo install -m 755 "$BUILD_DIR/$APP_NAME" "$DEST_PATH"
+
+  echo "==> Restarting service..."
+  sudo systemctl restart "$SERVICE_NAME"
+  sudo systemctl status "$SERVICE_NAME" --no-pager
+
+  echo "==> Update complete."
+  exit 0
+fi
+
+# ---- FULL SETUP (default) ----
+
 # ---- BUILD ----
 echo "==> Building release binary locally from current repo..."
 cargo build --release
