@@ -96,6 +96,7 @@ async fn main() {
             name TEXT NOT NULL,
             description TEXT,
             base_price REAL NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
             image_url TEXT,
             created_at TEXT NOT NULL
         )",
@@ -103,6 +104,10 @@ async fn main() {
     .execute(&db)
     .await
     .expect("failed to create products table");
+
+    migrate_products_table(&db)
+        .await
+        .expect("failed to migrate products table");
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS orders (
@@ -218,6 +223,26 @@ async fn migrate_users_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+async fn migrate_products_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    let active_col_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('products') WHERE name = 'is_active'",
+    )
+    .fetch_one(db)
+    .await?;
+
+    if active_col_exists == 0 {
+        sqlx::query("ALTER TABLE products ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+            .execute(db)
+            .await?;
+    }
+
+    sqlx::query("UPDATE products SET is_active = 1 WHERE is_active IS NULL")
+        .execute(db)
+        .await?;
+
+    Ok(())
+}
+
 //
 // ROUTES
 //
@@ -235,10 +260,12 @@ pub fn auth_routes() -> Router<AppState> {
         // Product routes
         .route("/api/products", get(get_products))
         .route("/api/products", post(create_product))
+        .route("/api/products/{id}", put(update_product))
         .route("/api/products/{id}/image", put(update_product_image))
         // Filament routes
         .route("/api/filaments", get(get_filaments))
         .route("/api/filaments", post(create_filament))
+        .route("/api/filaments/{id}", put(update_filament))
         .route("/api/filaments/{id}/image", put(update_filament_image))
         // Order routes
         .route("/api/orders", get(get_orders))
@@ -287,6 +314,7 @@ pub struct Product {
     pub name: String,
     pub description: Option<String>,
     pub base_price: f64,
+    pub is_active: bool,
     pub image_url: Option<String>,
     pub created_at: String,
 }
@@ -365,11 +393,28 @@ pub struct CreateProductRequest {
     pub name: String,
     pub description: Option<String>,
     pub base_price: f64,
+    pub is_active: Option<bool>,
+    pub image_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProductRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub base_price: f64,
+    pub is_active: bool,
     pub image_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateFilamentRequest {
+    pub name: String,
+    pub surcharge: f64,
+    pub image_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateFilamentRequest {
     pub name: String,
     pub surcharge: f64,
     pub image_url: Option<String>,
@@ -871,15 +916,42 @@ pub async fn create_product(
     require_minimum_role(&state, &cookies, UserRole::Operator).await?;
 
     let created_at = Utc::now().to_rfc3339();
+    let is_active = payload.is_active.unwrap_or(true);
 
     let product = sqlx::query_as::<_, Product>(
-        "INSERT INTO products (name, description, base_price, image_url, created_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
+        "INSERT INTO products (name, description, base_price, is_active, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
     )
     .bind(&payload.name)
     .bind(&payload.description)
     .bind(payload.base_price)
+    .bind(is_active)
     .bind(&payload.image_url)
     .bind(&created_at)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| AuthError::Internal)?;
+
+    Ok(Json(product))
+}
+
+pub async fn update_product(
+    State(state): State<AppState>,
+    Path(product_id): Path<i64>,
+    cookies: Cookies,
+    Json(payload): Json<UpdateProductRequest>,
+) -> Result<Json<Product>, AuthError> {
+    // Only operators and admins can update products
+    require_minimum_role(&state, &cookies, UserRole::Operator).await?;
+
+    let product = sqlx::query_as::<_, Product>(
+        "UPDATE products SET name = ?, description = ?, base_price = ?, is_active = ?, image_url = ? WHERE id = ? RETURNING *",
+    )
+    .bind(&payload.name)
+    .bind(&payload.description)
+    .bind(payload.base_price)
+    .bind(payload.is_active)
+    .bind(&payload.image_url)
+    .bind(product_id)
     .fetch_one(&state.db)
     .await
     .map_err(|_| AuthError::Internal)?;
@@ -935,6 +1007,29 @@ pub async fn create_filament(
     .bind(&payload.name)
     .bind(payload.surcharge)
     .bind(&payload.image_url)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| AuthError::Internal)?;
+
+    Ok(Json(filament))
+}
+
+pub async fn update_filament(
+    State(state): State<AppState>,
+    Path(filament_id): Path<i64>,
+    cookies: Cookies,
+    Json(payload): Json<UpdateFilamentRequest>,
+) -> Result<Json<Filament>, AuthError> {
+    // Only operators and admins can update filaments
+    require_minimum_role(&state, &cookies, UserRole::Operator).await?;
+
+    let filament = sqlx::query_as::<_, Filament>(
+        "UPDATE filaments SET name = ?, surcharge = ?, image_url = ? WHERE id = ? RETURNING *",
+    )
+    .bind(&payload.name)
+    .bind(payload.surcharge)
+    .bind(&payload.image_url)
+    .bind(filament_id)
     .fetch_one(&state.db)
     .await
     .map_err(|_| AuthError::Internal)?;
