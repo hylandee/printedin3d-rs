@@ -12,7 +12,7 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::sync::OnceLock;
 use thiserror::Error;
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
@@ -108,6 +108,10 @@ async fn main() {
     migrate_products_table(&db)
         .await
         .expect("failed to migrate products table");
+
+    normalize_existing_asset_urls(&db)
+        .await
+        .expect("failed to normalize asset urls");
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS orders (
@@ -239,6 +243,36 @@ async fn migrate_products_table(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE products SET is_active = 1 WHERE is_active IS NULL")
         .execute(db)
         .await?;
+
+    Ok(())
+}
+
+async fn normalize_existing_asset_urls(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    normalize_table_asset_urls(db, "products").await?;
+    normalize_table_asset_urls(db, "filaments").await?;
+    Ok(())
+}
+
+async fn normalize_table_asset_urls(db: &SqlitePool, table_name: &str) -> Result<(), sqlx::Error> {
+    let select_query = format!(
+        "SELECT id, image_url FROM {table_name} WHERE image_url IS NOT NULL"
+    );
+    let update_query = format!("UPDATE {table_name} SET image_url = ? WHERE id = ?");
+
+    let rows = sqlx::query(&select_query).fetch_all(db).await?;
+
+    for row in rows {
+        let id: i64 = row.get("id");
+        let image_url: String = row.get("image_url");
+
+        if let Some(normalized) = normalize_image_url(Some(image_url)) {
+            sqlx::query(&update_query)
+                .bind(normalized)
+                .bind(id)
+                .execute(db)
+                .await?;
+        }
+    }
 
     Ok(())
 }
@@ -631,6 +665,57 @@ fn validate_password(password: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+fn normalize_image_url(image_url: Option<String>) -> Option<String> {
+    let raw = image_url?.trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let path = if let Some(path) = raw.strip_prefix("s3://") {
+        path.to_string()
+    } else if let Some(path) = raw.strip_prefix("https://s3.us-east-1.amazonaws.com/") {
+        path.to_string()
+    } else if let Some(path) = raw.strip_prefix("https://s3.amazonaws.com/") {
+        path.to_string()
+    } else {
+        return Some(raw);
+    };
+
+    let Some((bucket, key)) = path.split_once('/') else {
+        return Some(raw);
+    };
+
+    let encoded_key = key
+        .split('/')
+        .map(percent_encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Some(format!("https://s3.us-east-1.amazonaws.com/{bucket}/{encoded_key}"))
+}
+
+fn percent_encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::new();
+
+    for byte in segment.bytes() {
+        let is_unreserved = matches!(byte,
+            b'A'..=b'Z' |
+            b'a'..=b'z' |
+            b'0'..=b'9' |
+            b'-' | b'_' | b'.' | b'~'
+        );
+
+        if is_unreserved {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{:02X}", byte));
+        }
+    }
+
+    encoded
+}
+
 //
 // STATE
 //
@@ -917,6 +1002,7 @@ pub async fn create_product(
 
     let created_at = Utc::now().to_rfc3339();
     let is_active = payload.is_active.unwrap_or(true);
+    let image_url = normalize_image_url(payload.image_url);
 
     let product = sqlx::query_as::<_, Product>(
         "INSERT INTO products (name, description, base_price, is_active, image_url, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
@@ -925,7 +1011,7 @@ pub async fn create_product(
     .bind(&payload.description)
     .bind(payload.base_price)
     .bind(is_active)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .bind(&created_at)
     .fetch_one(&state.db)
     .await
@@ -943,6 +1029,8 @@ pub async fn update_product(
     // Only operators and admins can update products
     require_minimum_role(&state, &cookies, UserRole::Operator).await?;
 
+    let image_url = normalize_image_url(payload.image_url);
+
     let product = sqlx::query_as::<_, Product>(
         "UPDATE products SET name = ?, description = ?, base_price = ?, is_active = ?, image_url = ? WHERE id = ? RETURNING *",
     )
@@ -950,7 +1038,7 @@ pub async fn update_product(
     .bind(&payload.description)
     .bind(payload.base_price)
     .bind(payload.is_active)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .bind(product_id)
     .fetch_one(&state.db)
     .await
@@ -967,9 +1055,10 @@ pub async fn update_product_image(
 ) -> Result<StatusCode, AuthError> {
     // Only admins can update product images
     require_minimum_role(&state, &cookies, UserRole::Admin).await?;
+    let image_url = normalize_image_url(Some(payload.image_url));
     
     sqlx::query("UPDATE products SET image_url = ? WHERE id = ?")
-        .bind(&payload.image_url)
+        .bind(&image_url)
         .bind(product_id)
         .execute(&state.db)
         .await
@@ -1001,12 +1090,14 @@ pub async fn create_filament(
     // Only operators and admins can create filaments
     require_minimum_role(&state, &cookies, UserRole::Operator).await?;
 
+    let image_url = normalize_image_url(payload.image_url);
+
     let filament = sqlx::query_as::<_, Filament>(
         "INSERT INTO filaments (name, surcharge, image_url) VALUES (?, ?, ?) RETURNING *",
     )
     .bind(&payload.name)
     .bind(payload.surcharge)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .fetch_one(&state.db)
     .await
     .map_err(|_| AuthError::Internal)?;
@@ -1023,12 +1114,14 @@ pub async fn update_filament(
     // Only operators and admins can update filaments
     require_minimum_role(&state, &cookies, UserRole::Operator).await?;
 
+    let image_url = normalize_image_url(payload.image_url);
+
     let filament = sqlx::query_as::<_, Filament>(
         "UPDATE filaments SET name = ?, surcharge = ?, image_url = ? WHERE id = ? RETURNING *",
     )
     .bind(&payload.name)
     .bind(payload.surcharge)
-    .bind(&payload.image_url)
+    .bind(&image_url)
     .bind(filament_id)
     .fetch_one(&state.db)
     .await
@@ -1045,9 +1138,10 @@ pub async fn update_filament_image(
 ) -> Result<StatusCode, AuthError> {
     // Only admins can update filament images
     require_minimum_role(&state, &cookies, UserRole::Admin).await?;
+    let image_url = normalize_image_url(Some(payload.image_url));
     
     sqlx::query("UPDATE filaments SET image_url = ? WHERE id = ?")
-        .bind(&payload.image_url)
+        .bind(&image_url)
         .bind(filament_id)
         .execute(&state.db)
         .await
